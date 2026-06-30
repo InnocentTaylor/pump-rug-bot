@@ -4,7 +4,7 @@ import { startPumpListener } from './src/pumpListener.js';
 import { getMintRisk } from './src/solanaChecks.js';
 import { computeRugScore } from './src/rugScore.js';
 import { createBot, sendAlert } from './src/telegram.js';
-import { logDecision } from './src/logger.js';
+import { logDecision, markGraduated } from './src/logger.js';
 
 const {
   TELEGRAM_BOT_TOKEN,
@@ -38,13 +38,9 @@ pumpEvents.on('newToken', async (token) => {
   const { mint, name, symbol, marketCapSol, initialBuy } = token;
 
   try {
-    // Give the chain a few seconds to finalize the create + initial buy
-    // before reading mint/holder state.
     await new Promise((r) => setTimeout(r, 4000));
 
     const risk = await getMintRisk(connection, mint);
-
-    // Estimate the creator's share of supply from their initial buy.
     const supplyUi = Number(risk.supply) / 10 ** risk.decimals;
     const devHoldPercent =
       supplyUi > 0 ? (Number(initialBuy || 0) / supplyUi) * 100 : 0;
@@ -60,7 +56,6 @@ pumpEvents.on('newToken', async (token) => {
 
     const alerted = score <= alertMaxScore;
 
-    // Log every coin checked — both alerted and skipped — for later review.
     logDecision({
       mint,
       name,
@@ -81,6 +76,14 @@ pumpEvents.on('newToken', async (token) => {
     }
   } catch (err) {
     console.error(`Failed to evaluate ${mint}:`, err.message);
+  }
+});
+
+// NEW — catches the graduation signal and tags the matching notebook entry.
+pumpEvents.on('tokenGraduated', (data) => {
+  console.log('GRADUATION EVENT RECEIVED:', JSON.stringify(data));
+  if (data.mint) {
+    markGraduated(data.mint);
   }
 });
 
