@@ -1,14 +1,37 @@
-// Keeps a running notebook of every token the bot evaluates, in memory.
-// Resets if the bot restarts — that's fine for casual review, not meant
-// to be a permanent database.
-const decisions = [];
-const MAX_ENTRIES = 1000;
+// Writes every decision the bot makes to a file, so it survives restarts
+// once this file path points at a Railway Volume.
+import fs from 'fs';
+import path from 'path';
+
+const LOG_FILE_PATH = process.env.LOG_FILE_PATH || './data/decisions.jsonl';
+
+function ensureLogDir() {
+  const dir = path.dirname(LOG_FILE_PATH);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
 
 export function logDecision(entry) {
-  decisions.push({ ...entry, timestamp: new Date().toISOString() });
-  if (decisions.length > MAX_ENTRIES) decisions.shift();
+  try {
+    ensureLogDir();
+    const line = JSON.stringify({ ...entry, timestamp: new Date().toISOString() }) + '\n';
+    fs.appendFileSync(LOG_FILE_PATH, line);
+  } catch (err) {
+    console.error('Failed to write log entry:', err.message);
+  }
 }
 
 export function getDecisions() {
-  return decisions;
+  try {
+    if (!fs.existsSync(LOG_FILE_PATH)) return [];
+    const content = fs.readFileSync(LOG_FILE_PATH, 'utf-8');
+    return content
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch (err) {
+    console.error('Failed to read log file:', err.message);
+    return [];
+  }
 }
