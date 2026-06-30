@@ -4,6 +4,7 @@ import { startPumpListener } from './src/pumpListener.js';
 import { getMintRisk } from './src/solanaChecks.js';
 import { computeRugScore } from './src/rugScore.js';
 import { createBot, sendAlert } from './src/telegram.js';
+import { logDecision } from './src/logger.js';
 
 const {
   TELEGRAM_BOT_TOKEN,
@@ -57,9 +58,24 @@ pumpEvents.on('newToken', async (token) => {
       thresholds,
     });
 
+    const alerted = score <= alertMaxScore;
+
+    // Log every coin checked — both alerted and skipped — for later review.
+    logDecision({
+      mint,
+      name,
+      symbol,
+      score,
+      flags,
+      devHoldPercent,
+      top10HoldPercent: risk.top10HoldPercent,
+      marketCapSol: marketCapSol || 0,
+      alerted,
+    });
+
     console.log(`${symbol || mint} — score ${score}`, flags);
 
-    if (score <= alertMaxScore) {
+    if (alerted) {
       const message = formatAlert({ mint, name, symbol, score, flags, marketCapSol });
       await sendAlert(bot, TELEGRAM_CHAT_ID, message);
     }
