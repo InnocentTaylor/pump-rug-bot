@@ -1,0 +1,20 @@
+{
+  "name": "pump-rug-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that watches pump.fun (Solana) for new token launches and flags early rug-risk signals.",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": "^1.95.3",
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.66.0",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
