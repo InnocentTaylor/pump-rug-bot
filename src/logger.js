@@ -35,3 +35,27 @@ export function getDecisions() {
     return [];
   }
 }
+
+// Finds the notebook entry for a given coin and tags it as graduated.
+// Rewrites the whole file — fine at the data sizes this project expects.
+export function markGraduated(mint) {
+  try {
+    const decisions = getDecisions();
+    let found = false;
+    const updated = decisions.map((entry) => {
+      if (entry.mint === mint && !entry.graduated) {
+        found = true;
+        return { ...entry, graduated: true, graduatedAt: new Date().toISOString() };
+      }
+      return entry;
+    });
+
+    if (found) {
+      ensureLogDir();
+      const lines = updated.map((e) => JSON.stringify(e)).join('\n') + '\n';
+      fs.writeFileSync(LOG_FILE_PATH, lines);
+    }
+  } catch (err) {
+    console.error('Failed to mark graduation:', err.message);
+  }
+}
