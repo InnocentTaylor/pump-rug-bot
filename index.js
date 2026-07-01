@@ -10,10 +10,12 @@ const {
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHAT_ID,
   SOLANA_RPC_URL = 'https://api.mainnet-beta.solana.com',
-  ALERT_MAX_SCORE = '40',
+  ALERT_MAX_SCORE = '30',
   MAX_DEV_HOLD_PERCENT = '15',
   MAX_TOP10_HOLD_PERCENT = '40',
   MAX_PRICE_ABOVE_BASELINE_PERCENT = '25',
+  MIN_PERCENT_BOUGHT_TO_ALERT = '3',
+  EVALUATION_DELAY_MS = '20000',
 } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -27,6 +29,8 @@ const thresholds = {
   maxPriceAboveBaselinePercent: Number(MAX_PRICE_ABOVE_BASELINE_PERCENT),
 };
 const alertMaxScore = Number(ALERT_MAX_SCORE);
+const minPercentBoughtToAlert = Number(MIN_PERCENT_BOUGHT_TO_ALERT);
+const evaluationDelayMs = Number(EVALUATION_DELAY_MS);
 
 const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
 const bot = createBot(TELEGRAM_BOT_TOKEN);
@@ -48,7 +52,10 @@ pumpEvents.on('newToken', async (token) => {
   seenMints.add(mint);
 
   try {
-    await new Promise((r) => setTimeout(r, 4000));
+    // Waiting longer gives real buying activity time to happen before we
+    // judge a coin — checking at 4 seconds meant almost every coin looked
+    // "clean" simply because nothing had happened yet, good or bad.
+    await new Promise((r) => setTimeout(r, evaluationDelayMs));
 
     const risk = await getMintRisk(connection, mint, bondingCurveKey);
     const supplyUi = Number(risk.supply) / 10 ** risk.decimals;
@@ -65,7 +72,13 @@ pumpEvents.on('newToken', async (token) => {
       thresholds,
     });
 
-    const alerted = score <= alertMaxScore;
+    const scoreQualifies = score <= alertMaxScore;
+    const hasRealBuying = risk.percentBought >= minPercentBoughtToAlert;
+    const alerted = scoreQualifies && hasRealBuying;
+
+    if (scoreQualifies && !hasRealBuying) {
+      flags.push(`Skipped alert — only ${risk.percentBought.toFixed(2)}% bought (need ${minPercentBoughtToAlert}%)`);
+    }
 
     logDecision({
       mint,
@@ -99,7 +112,7 @@ pumpEvents.on('tokenGraduated', (data) => {
 });
 
 function formatAlert({ mint, name, symbol, score, flags, marketCapSol }) {
-  const safety = score <= 20 ? '🟢 Low risk signals' : '🟡 Moderate risk signals';
+  const safety = score <= 15 ? '🟢 Low risk signals' : '🟡 Moderate risk signals';
   const flagList = flags.length
     ? flags.map((f) => `• ${f}`).join('\n')
     : '• No major red flags detected';
