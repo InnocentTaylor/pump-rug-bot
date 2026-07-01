@@ -1,12 +1,23 @@
 import { PublicKey } from '@solana/web3.js';
 
-// Reads recent transactions that touched the bonding curve's own token
-// account directly from Solana itself, not from PumpPortal. A real buy or
-// sell always moves tokens through the curve; private wallet-to-wallet
-// transfers never do, so this naturally excludes gifts, self-transfers,
-// or fake volume that bypasses the actual trading mechanism.
+async function withRetry(fn, retries = 2, delayMs = 500) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt === retries) throw err;
+      await new Promise((r) => setTimeout(r, delayMs * attempt));
+    }
+  }
+}
+
+// Reads a handful of the most recent transactions touching the bonding
+// curve's own token account directly from Solana. Kept intentionally
+// small (not a deep history) since we only care about activity within
+// our short observation window, and each transaction costs a real
+// request against our RPC's rate limit.
 export async function getRecentBuyerActivity(connection, mintAddress, bondingCurveAddress, options = {}) {
-  const { lookbackSignatures = 40 } = options;
+  const { lookbackSignatures = 8 } = options;
 
   if (!bondingCurveAddress) {
     return { uniqueBuyers: 0, buyCount: 0, sellCount: 0 };
@@ -14,9 +25,10 @@ export async function getRecentBuyerActivity(connection, mintAddress, bondingCur
 
   let signatures;
   try {
-    signatures = await connection.getSignaturesForAddress(
-      new PublicKey(bondingCurveAddress),
-      { limit: lookbackSignatures }
+    signatures = await withRetry(() =>
+      connection.getSignaturesForAddress(new PublicKey(bondingCurveAddress), {
+        limit: lookbackSignatures,
+      })
     );
   } catch {
     return { uniqueBuyers: 0, buyCount: 0, sellCount: 0 };
@@ -28,9 +40,11 @@ export async function getRecentBuyerActivity(connection, mintAddress, bondingCur
 
   for (const sigInfo of signatures) {
     try {
-      const tx = await connection.getParsedTransaction(sigInfo.signature, {
-        maxSupportedTransactionVersion: 0,
-      });
+      const tx = await withRetry(() =>
+        connection.getParsedTransaction(sigInfo.signature, {
+          maxSupportedTransactionVersion: 0,
+        })
+      );
       if (!tx?.meta) continue;
 
       const pre = tx.meta.preTokenBalances || [];
@@ -44,7 +58,7 @@ export async function getRecentBuyerActivity(connection, mintAddress, bondingCur
         Number(curvePost.uiTokenAmount.amount) - Number(curvePre.uiTokenAmount.amount);
       if (curveDelta === 0) continue;
 
-      const isBuy = curveDelta < 0; // tokens left the curve = someone bought
+      const isBuy = curveDelta < 0;
 
       for (const postEntry of post) {
         if (postEntry.mint !== mintAddress || postEntry.owner === bondingCurveAddress) continue;
@@ -59,6 +73,9 @@ export async function getRecentBuyerActivity(connection, mintAddress, bondingCur
           sellCount++;
         }
       }
+
+      // Small pause between lookups so we don't burst the rate limit.
+      await new Promise((r) => setTimeout(r, 150));
     } catch {
       continue;
     }
