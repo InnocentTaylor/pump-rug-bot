@@ -75,11 +75,12 @@ pumpEvents.on('newToken', async (token) => {
       await sendAlert(bot, TELEGRAM_CHAT_ID, message);
     }
   } catch (err) {
-    console.error(`Failed to evaluate ${mint}:`, err.message);
+    // Full error detail — not just err.message — so real failure reasons
+    // (RPC errors, network issues, etc.) are actually visible in logs.
+    console.error(`Failed to evaluate ${mint}:`, err?.message, JSON.stringify(err, Object.getOwnPropertyNames(err || {})));
   }
 });
 
-// NEW — catches the graduation signal and tags the matching notebook entry.
 pumpEvents.on('tokenGraduated', (data) => {
   console.log('GRADUATION EVENT RECEIVED:', JSON.stringify(data));
   if (data.mint) {
