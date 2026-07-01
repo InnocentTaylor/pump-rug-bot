@@ -5,6 +5,7 @@ import {
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID,
 } from '@solana/spl-token';
+import { rateLimited } from './rateLimiter.js';
 
 async function withRetry(fn, retries = 3, delayMs = 800) {
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -19,11 +20,11 @@ async function withRetry(fn, retries = 3, delayMs = 800) {
 
 async function getMintAnyProgram(connection, mintPubkey) {
   try {
-    const mintInfo = await getMint(connection, mintPubkey, 'confirmed', TOKEN_PROGRAM_ID);
+    const mintInfo = await rateLimited(() => getMint(connection, mintPubkey, 'confirmed', TOKEN_PROGRAM_ID));
     return { mintInfo, programId: TOKEN_PROGRAM_ID };
   } catch (err) {
     if (err?.name === 'TokenInvalidAccountOwnerError') {
-      const mintInfo = await getMint(connection, mintPubkey, 'confirmed', TOKEN_2022_PROGRAM_ID);
+      const mintInfo = await rateLimited(() => getMint(connection, mintPubkey, 'confirmed', TOKEN_2022_PROGRAM_ID));
       return { mintInfo, programId: TOKEN_2022_PROGRAM_ID };
     }
     throw err;
@@ -37,7 +38,9 @@ export async function getMintRisk(connection, mintAddress, bondingCurveAddress) 
   const supply = mintInfo.supply;
   const decimals = mintInfo.decimals;
 
-  const largest = await withRetry(() => connection.getTokenLargestAccounts(mintPubkey));
+  const largest = await withRetry(() =>
+    rateLimited(() => connection.getTokenLargestAccounts(mintPubkey))
+  );
 
   let curveAtaAddress = null;
   if (bondingCurveAddress) {
