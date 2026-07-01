@@ -18,6 +18,7 @@ const {
   MIN_PERCENT_BOUGHT_TO_ALERT = '3',
   EVALUATION_DELAY_MS = '20000',
   REQUIRE_SOCIAL_LINK = 'true',
+  MIN_UNIQUE_BUYERS = '2',
 } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -29,6 +30,7 @@ const thresholds = {
   maxDevHoldPercent: Number(MAX_DEV_HOLD_PERCENT),
   maxTop10HoldPercent: Number(MAX_TOP10_HOLD_PERCENT),
   maxPriceAboveBaselinePercent: Number(MAX_PRICE_ABOVE_BASELINE_PERCENT),
+  minUniqueBuyers: Number(MIN_UNIQUE_BUYERS),
 };
 const alertMaxScore = Number(ALERT_MAX_SCORE);
 const minPercentBoughtToAlert = Number(MIN_PERCENT_BOUGHT_TO_ALERT);
@@ -47,6 +49,14 @@ function escapeMarkdown(text) {
 }
 
 const seenMints = new Set();
+const tradeBuffers = new Map(); // mint -> { buys: [], sells: [] }
+
+pumpEvents.on('tokenTrade', (data) => {
+  const buffer = tradeBuffers.get(data.mint);
+  if (!buffer) return;
+  if (data.txType === 'buy') buffer.buys.push(data.traderPublicKey);
+  else if (data.txType === 'sell') buffer.sells.push(data.traderPublicKey);
+});
 
 pumpEvents.on('newToken', async (token) => {
   const { mint, name, symbol, marketCapSol, initialBuy, bondingCurveKey, uri } = token;
@@ -54,8 +64,16 @@ pumpEvents.on('newToken', async (token) => {
   if (seenMints.has(mint)) return;
   seenMints.add(mint);
 
+  tradeBuffers.set(mint, { buys: [], sells: [] });
+  pumpEvents.subscribeTrades(mint);
+
   try {
     await new Promise((r) => setTimeout(r, evaluationDelayMs));
+
+    const buffer = tradeBuffers.get(mint) || { buys: [], sells: [] };
+    const uniqueBuyerCount = new Set(buffer.buys).size;
+    const buyCount = buffer.buys.length;
+    const sellCount = buffer.sells.length;
 
     const [risk, metadata] = await Promise.all([
       getMintRisk(connection, mint, bondingCurveKey),
@@ -73,6 +91,9 @@ pumpEvents.on('newToken', async (token) => {
       top10HoldPercent: risk.top10HoldPercent,
       percentBought: risk.percentBought,
       marketCapSol: marketCapSol || 0,
+      uniqueBuyerCount,
+      buyCount,
+      sellCount,
       thresholds,
     });
 
@@ -99,6 +120,9 @@ pumpEvents.on('newToken', async (token) => {
       devHoldPercent,
       top10HoldPercent: risk.top10HoldPercent,
       percentBought: risk.percentBought,
+      uniqueBuyerCount,
+      buyCount,
+      sellCount,
       marketCapSol: marketCapSol || 0,
       hasAnySocial,
       alerted,
@@ -112,6 +136,9 @@ pumpEvents.on('newToken', async (token) => {
     }
   } catch (err) {
     console.error(`Failed to evaluate ${mint}:`, err?.message, JSON.stringify(err, Object.getOwnPropertyNames(err || {})));
+  } finally {
+    pumpEvents.unsubscribeTrades(mint);
+    tradeBuffers.delete(mint);
   }
 });
 
