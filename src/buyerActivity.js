@@ -1,4 +1,5 @@
 import { PublicKey } from '@solana/web3.js';
+import { rateLimited } from './rateLimiter.js';
 
 async function withRetry(fn, retries = 2, delayMs = 500) {
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -11,11 +12,6 @@ async function withRetry(fn, retries = 2, delayMs = 500) {
   }
 }
 
-// Reads a handful of the most recent transactions touching the bonding
-// curve's own token account directly from Solana. Kept intentionally
-// small (not a deep history) since we only care about activity within
-// our short observation window, and each transaction costs a real
-// request against our RPC's rate limit.
 export async function getRecentBuyerActivity(connection, mintAddress, bondingCurveAddress, options = {}) {
   const { lookbackSignatures = 8 } = options;
 
@@ -26,9 +22,11 @@ export async function getRecentBuyerActivity(connection, mintAddress, bondingCur
   let signatures;
   try {
     signatures = await withRetry(() =>
-      connection.getSignaturesForAddress(new PublicKey(bondingCurveAddress), {
-        limit: lookbackSignatures,
-      })
+      rateLimited(() =>
+        connection.getSignaturesForAddress(new PublicKey(bondingCurveAddress), {
+          limit: lookbackSignatures,
+        })
+      )
     );
   } catch {
     return { uniqueBuyers: 0, buyCount: 0, sellCount: 0 };
@@ -41,9 +39,11 @@ export async function getRecentBuyerActivity(connection, mintAddress, bondingCur
   for (const sigInfo of signatures) {
     try {
       const tx = await withRetry(() =>
-        connection.getParsedTransaction(sigInfo.signature, {
-          maxSupportedTransactionVersion: 0,
-        })
+        rateLimited(() =>
+          connection.getParsedTransaction(sigInfo.signature, {
+            maxSupportedTransactionVersion: 0,
+          })
+        )
       );
       if (!tx?.meta) continue;
 
@@ -73,9 +73,6 @@ export async function getRecentBuyerActivity(connection, mintAddress, bondingCur
           sellCount++;
         }
       }
-
-      // Small pause between lookups so we don't burst the rate limit.
-      await new Promise((r) => setTimeout(r, 150));
     } catch {
       continue;
     }
