@@ -1,30 +1,35 @@
 import { PublicKey } from '@solana/web3.js';
-import { getMint } from '@solana/spl-token';
+import { getMint, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 
 async function withRetry(fn, retries = 3, delayMs = 800) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      const isLastAttempt = attempt === retries;
-      if (isLastAttempt) throw err;
+      if (attempt === retries) throw err;
       await new Promise((r) => setTimeout(r, delayMs * attempt));
     }
   }
 }
 
-/**
- * Pulls the on-chain signals that matter most for pump.fun rug risk:
- *  - mint authority renounced (can supply still be inflated?)
- *  - freeze authority renounced (can wallets be frozen?)
- *  - concentration of supply in the top 10 holder wallets
- * Wrapped in retries since RPC providers occasionally return transient
- * errors (like 503) that succeed on a second attempt.
- */
+// Some pump.fun coins use the older Token Program, others use the newer
+// Token-2022 Program. Try the common one first; if it's the wrong program,
+// automatically retry with the other one instead of failing outright.
+async function getMintAnyProgram(connection, mintPubkey) {
+  try {
+    return await getMint(connection, mintPubkey, 'confirmed', TOKEN_PROGRAM_ID);
+  } catch (err) {
+    if (err?.name === 'TokenInvalidAccountOwnerError') {
+      return await getMint(connection, mintPubkey, 'confirmed', TOKEN_2022_PROGRAM_ID);
+    }
+    throw err;
+  }
+}
+
 export async function getMintRisk(connection, mintAddress) {
   const mintPubkey = new PublicKey(mintAddress);
 
-  const mintInfo = await withRetry(() => getMint(connection, mintPubkey));
+  const mintInfo = await withRetry(() => getMintAnyProgram(connection, mintPubkey));
   const supply = mintInfo.supply;
   const decimals = mintInfo.decimals;
 
