@@ -13,7 +13,7 @@ const {
   ALERT_MAX_SCORE = '40',
   MAX_DEV_HOLD_PERCENT = '15',
   MAX_TOP10_HOLD_PERCENT = '40',
-  MIN_MARKET_CAP_SOL = '3',
+  MAX_PRICE_ABOVE_BASELINE_PERCENT = '25',
 } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -24,7 +24,7 @@ if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
 const thresholds = {
   maxDevHoldPercent: Number(MAX_DEV_HOLD_PERCENT),
   maxTop10HoldPercent: Number(MAX_TOP10_HOLD_PERCENT),
-  minMarketCapSol: Number(MIN_MARKET_CAP_SOL),
+  maxPriceAboveBaselinePercent: Number(MAX_PRICE_ABOVE_BASELINE_PERCENT),
 };
 const alertMaxScore = Number(ALERT_MAX_SCORE);
 
@@ -34,21 +34,23 @@ const pumpEvents = startPumpListener();
 
 console.log('Watching pump.fun for new launches...');
 
-// Coin names are written by anonymous creators and can contain characters
-// (_, *, `, [, ]) that Telegram's Markdown parser misreads as formatting.
-// Escaping them keeps the message plain text instead of breaking delivery.
 function escapeMarkdown(text) {
   if (!text) return text;
   return String(text).replace(/([_*`[\]])/g, '\\$1');
 }
 
+const seenMints = new Set();
+
 pumpEvents.on('newToken', async (token) => {
-  const { mint, name, symbol, marketCapSol, initialBuy } = token;
+  const { mint, name, symbol, marketCapSol, initialBuy, bondingCurveKey } = token;
+
+  if (seenMints.has(mint)) return;
+  seenMints.add(mint);
 
   try {
     await new Promise((r) => setTimeout(r, 4000));
 
-    const risk = await getMintRisk(connection, mint);
+    const risk = await getMintRisk(connection, mint, bondingCurveKey);
     const supplyUi = Number(risk.supply) / 10 ** risk.decimals;
     const devHoldPercent =
       supplyUi > 0 ? (Number(initialBuy || 0) / supplyUi) * 100 : 0;
@@ -58,6 +60,7 @@ pumpEvents.on('newToken', async (token) => {
       freezeAuthorityRenounced: risk.freezeAuthorityRenounced,
       devHoldPercent,
       top10HoldPercent: risk.top10HoldPercent,
+      percentBought: risk.percentBought,
       marketCapSol: marketCapSol || 0,
       thresholds,
     });
@@ -72,6 +75,7 @@ pumpEvents.on('newToken', async (token) => {
       flags,
       devHoldPercent,
       top10HoldPercent: risk.top10HoldPercent,
+      percentBought: risk.percentBought,
       marketCapSol: marketCapSol || 0,
       alerted,
     });
