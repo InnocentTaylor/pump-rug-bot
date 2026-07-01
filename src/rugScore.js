@@ -1,5 +1,5 @@
-const BASELINE_MARKET_CAP_SOL = 30; // pump.fun's default starting virtual market cap
-const MIN_PERCENT_BOUGHT_TO_JUDGE = 1; // need at least this much bought before concentration % means anything
+const BASELINE_MARKET_CAP_SOL = 30;
+const MIN_PERCENT_BOUGHT_TO_JUDGE = 1;
 
 export function computeRugScore({
   mintAuthorityRenounced,
@@ -8,6 +8,9 @@ export function computeRugScore({
   top10HoldPercent,
   percentBought,
   marketCapSol,
+  uniqueBuyerCount,
+  buyCount,
+  sellCount,
   thresholds,
 }) {
   let score = 0;
@@ -41,6 +44,16 @@ export function computeRugScore({
   if (percentAboveBaseline > thresholds.maxPriceAboveBaselinePercent) {
     score += 15;
     flags.push(`Already ${percentAboveBaseline.toFixed(1)}% above launch baseline — may not be a fresh entry`);
+  }
+
+  if (uniqueBuyerCount !== undefined && uniqueBuyerCount < thresholds.minUniqueBuyers) {
+    score += 10;
+    flags.push(`Only ${uniqueBuyerCount} unique buyer(s) so far — low genuine interest`);
+  }
+
+  if (sellCount !== undefined && buyCount !== undefined && sellCount > buyCount) {
+    score += 15;
+    flags.push(`More sells (${sellCount}) than buys (${buyCount}) already — possible early dumping`);
   }
 
   return { score: Math.min(score, 100), flags };
