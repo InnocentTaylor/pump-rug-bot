@@ -19,18 +19,14 @@ export function startPumpListener() {
     ws.on('message', (raw) => {
       try {
         const data = JSON.parse(raw.toString());
-
-        // TEMPORARY — logs every raw message so we can confirm the real
-        // shape of graduation/migration events before trusting the
-        // parsing below. We'll remove this once confirmed.
         console.log('RAW MESSAGE:', JSON.stringify(data));
 
         if (data.txType === 'create' && data.mint) {
           emitter.emit('newToken', data);
         }
-
-        // Best-guess detection of a graduation event — to be confirmed
-        // against real messages and adjusted if needed.
+        if (data.mint && (data.txType === 'buy' || data.txType === 'sell')) {
+          emitter.emit('tokenTrade', data);
+        }
         if (data.mint && (data.txType === 'migrate' || data.pool === 'raydium')) {
           emitter.emit('tokenGraduated', data);
         }
@@ -49,6 +45,18 @@ export function startPumpListener() {
       ws.close();
     });
   }
+
+  // Tune in to / stop tuning in to one specific coin's live trades.
+  emitter.subscribeTrades = (mint) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ method: 'subscribeTokenTrade', keys: [mint] }));
+    }
+  };
+  emitter.unsubscribeTrades = (mint) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ method: 'unsubscribeTokenTrade', keys: [mint] }));
+    }
+  };
 
   connect();
   return emitter;
