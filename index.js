@@ -5,6 +5,7 @@ import { getMintRisk } from './src/solanaChecks.js';
 import { computeRugScore } from './src/rugScore.js';
 import { createBot, sendAlert } from './src/telegram.js';
 import { logDecision, markGraduated } from './src/logger.js';
+import { fetchTokenMetadata } from './src/metadata.js';
 
 const {
   TELEGRAM_BOT_TOKEN,
@@ -16,6 +17,7 @@ const {
   MAX_PRICE_ABOVE_BASELINE_PERCENT = '25',
   MIN_PERCENT_BOUGHT_TO_ALERT = '3',
   EVALUATION_DELAY_MS = '20000',
+  REQUIRE_SOCIAL_LINK = 'true',
 } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -31,6 +33,7 @@ const thresholds = {
 const alertMaxScore = Number(ALERT_MAX_SCORE);
 const minPercentBoughtToAlert = Number(MIN_PERCENT_BOUGHT_TO_ALERT);
 const evaluationDelayMs = Number(EVALUATION_DELAY_MS);
+const requireSocialLink = REQUIRE_SOCIAL_LINK === 'true';
 
 const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
 const bot = createBot(TELEGRAM_BOT_TOKEN);
@@ -46,18 +49,19 @@ function escapeMarkdown(text) {
 const seenMints = new Set();
 
 pumpEvents.on('newToken', async (token) => {
-  const { mint, name, symbol, marketCapSol, initialBuy, bondingCurveKey } = token;
+  const { mint, name, symbol, marketCapSol, initialBuy, bondingCurveKey, uri } = token;
 
   if (seenMints.has(mint)) return;
   seenMints.add(mint);
 
   try {
-    // Waiting longer gives real buying activity time to happen before we
-    // judge a coin — checking at 4 seconds meant almost every coin looked
-    // "clean" simply because nothing had happened yet, good or bad.
     await new Promise((r) => setTimeout(r, evaluationDelayMs));
 
-    const risk = await getMintRisk(connection, mint, bondingCurveKey);
+    const [risk, metadata] = await Promise.all([
+      getMintRisk(connection, mint, bondingCurveKey),
+      fetchTokenMetadata(uri),
+    ]);
+
     const supplyUi = Number(risk.supply) / 10 ** risk.decimals;
     const devHoldPercent =
       supplyUi > 0 ? (Number(initialBuy || 0) / supplyUi) * 100 : 0;
@@ -72,11 +76,17 @@ pumpEvents.on('newToken', async (token) => {
       thresholds,
     });
 
+    const hasAnySocial = metadata.hasTwitter || metadata.hasWebsite || metadata.hasTelegram;
+
     const scoreQualifies = score <= alertMaxScore;
     const hasRealBuying = risk.percentBought >= minPercentBoughtToAlert;
-    const alerted = scoreQualifies && hasRealBuying;
+    const socialRequirementMet = !requireSocialLink || hasAnySocial;
 
-    if (scoreQualifies && !hasRealBuying) {
+    const alerted = scoreQualifies && hasRealBuying && socialRequirementMet;
+
+    if (!socialRequirementMet) {
+      flags.push('Skipped alert — no social links provided (X/website/Telegram all missing)');
+    } else if (scoreQualifies && !hasRealBuying) {
       flags.push(`Skipped alert — only ${risk.percentBought.toFixed(2)}% bought (need ${minPercentBoughtToAlert}%)`);
     }
 
@@ -90,13 +100,14 @@ pumpEvents.on('newToken', async (token) => {
       top10HoldPercent: risk.top10HoldPercent,
       percentBought: risk.percentBought,
       marketCapSol: marketCapSol || 0,
+      hasAnySocial,
       alerted,
     });
 
     console.log(`${symbol || mint} — score ${score}`, flags);
 
     if (alerted) {
-      const message = formatAlert({ mint, name, symbol, score, flags, marketCapSol });
+      const message = formatAlert({ mint, name, symbol, score, flags, marketCapSol, metadata });
       await sendAlert(bot, TELEGRAM_CHAT_ID, message);
     }
   } catch (err) {
@@ -111,7 +122,7 @@ pumpEvents.on('tokenGraduated', (data) => {
   }
 });
 
-function formatAlert({ mint, name, symbol, score, flags, marketCapSol }) {
+function formatAlert({ mint, name, symbol, score, flags, marketCapSol, metadata }) {
   const safety = score <= 15 ? '🟢 Low risk signals' : '🟡 Moderate risk signals';
   const flagList = flags.length
     ? flags.map((f) => `• ${f}`).join('\n')
@@ -120,11 +131,18 @@ function formatAlert({ mint, name, symbol, score, flags, marketCapSol }) {
   const safeName = escapeMarkdown(name) || 'Unknown';
   const safeSymbol = escapeMarkdown(symbol) || '?';
 
+  const socialLines = [];
+  if (metadata?.twitter) socialLines.push(`[X/Twitter](${metadata.twitter})`);
+  if (metadata?.website) socialLines.push(`[Website](${metadata.website})`);
+  if (metadata?.telegram) socialLines.push(`[Telegram](${metadata.telegram})`);
+  const socialsText = socialLines.length ? socialLines.join(' | ') : 'None provided';
+
   return [
     `*New launch:* ${safeName} (${safeSymbol})`,
     `*Rug score:* ${score}/100 — ${safety}`,
     flagList,
     `*Market cap:* ${(marketCapSol || 0).toFixed(2)} SOL`,
+    `*Socials:* ${socialsText}`,
     `[GMGN](https://gmgn.ai/sol/token/${mint}) | [pump.fun](https://pump.fun/${mint})`,
   ].join('\n');
 }
