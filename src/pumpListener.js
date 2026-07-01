@@ -24,9 +24,6 @@ export function startPumpListener() {
         if (data.txType === 'create' && data.mint) {
           emitter.emit('newToken', data);
         }
-        if (data.mint && (data.txType === 'buy' || data.txType === 'sell')) {
-          emitter.emit('tokenTrade', data);
-        }
         if (data.mint && (data.txType === 'migrate' || data.pool === 'raydium')) {
           emitter.emit('tokenGraduated', data);
         }
@@ -45,18 +42,6 @@ export function startPumpListener() {
       ws.close();
     });
   }
-
-  // Tune in to / stop tuning in to one specific coin's live trades.
-  emitter.subscribeTrades = (mint) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ method: 'subscribeTokenTrade', keys: [mint] }));
-    }
-  };
-  emitter.unsubscribeTrades = (mint) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ method: 'unsubscribeTokenTrade', keys: [mint] }));
-    }
-  };
 
   connect();
   return emitter;
