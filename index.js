@@ -34,6 +34,14 @@ const pumpEvents = startPumpListener();
 
 console.log('Watching pump.fun for new launches...');
 
+// Coin names are written by anonymous creators and can contain characters
+// (_, *, `, [, ]) that Telegram's Markdown parser misreads as formatting.
+// Escaping them keeps the message plain text instead of breaking delivery.
+function escapeMarkdown(text) {
+  if (!text) return text;
+  return String(text).replace(/([_*`[\]])/g, '\\$1');
+}
+
 pumpEvents.on('newToken', async (token) => {
   const { mint, name, symbol, marketCapSol, initialBuy } = token;
 
@@ -75,8 +83,6 @@ pumpEvents.on('newToken', async (token) => {
       await sendAlert(bot, TELEGRAM_CHAT_ID, message);
     }
   } catch (err) {
-    // Full error detail — not just err.message — so real failure reasons
-    // (RPC errors, network issues, etc.) are actually visible in logs.
     console.error(`Failed to evaluate ${mint}:`, err?.message, JSON.stringify(err, Object.getOwnPropertyNames(err || {})));
   }
 });
@@ -94,8 +100,11 @@ function formatAlert({ mint, name, symbol, score, flags, marketCapSol }) {
     ? flags.map((f) => `• ${f}`).join('\n')
     : '• No major red flags detected';
 
+  const safeName = escapeMarkdown(name) || 'Unknown';
+  const safeSymbol = escapeMarkdown(symbol) || '?';
+
   return [
-    `*New launch:* ${name || 'Unknown'} (${symbol || '?'})`,
+    `*New launch:* ${safeName} (${safeSymbol})`,
     `*Rug score:* ${score}/100 — ${safety}`,
     flagList,
     `*Market cap:* ${(marketCapSol || 0).toFixed(2)} SOL`,
