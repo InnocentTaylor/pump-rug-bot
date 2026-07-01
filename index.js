@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { Connection } from '@solana/web3.js';
 import { startPumpListener } from './src/pumpListener.js';
 import { getMintRisk } from './src/solanaChecks.js';
+import { getRecentBuyerActivity } from './src/buyerActivity.js';
 import { computeRugScore } from './src/rugScore.js';
 import { createBot, sendAlert } from './src/telegram.js';
 import { logDecision, markGraduated } from './src/logger.js';
@@ -49,14 +50,6 @@ function escapeMarkdown(text) {
 }
 
 const seenMints = new Set();
-const tradeBuffers = new Map(); // mint -> { buys: [], sells: [] }
-
-pumpEvents.on('tokenTrade', (data) => {
-  const buffer = tradeBuffers.get(data.mint);
-  if (!buffer) return;
-  if (data.txType === 'buy') buffer.buys.push(data.traderPublicKey);
-  else if (data.txType === 'sell') buffer.sells.push(data.traderPublicKey);
-});
 
 pumpEvents.on('newToken', async (token) => {
   const { mint, name, symbol, marketCapSol, initialBuy, bondingCurveKey, uri } = token;
@@ -64,20 +57,13 @@ pumpEvents.on('newToken', async (token) => {
   if (seenMints.has(mint)) return;
   seenMints.add(mint);
 
-  tradeBuffers.set(mint, { buys: [], sells: [] });
-  pumpEvents.subscribeTrades(mint);
-
   try {
     await new Promise((r) => setTimeout(r, evaluationDelayMs));
 
-    const buffer = tradeBuffers.get(mint) || { buys: [], sells: [] };
-    const uniqueBuyerCount = new Set(buffer.buys).size;
-    const buyCount = buffer.buys.length;
-    const sellCount = buffer.sells.length;
-
-    const [risk, metadata] = await Promise.all([
+    const [risk, metadata, activity] = await Promise.all([
       getMintRisk(connection, mint, bondingCurveKey),
       fetchTokenMetadata(uri),
+      getRecentBuyerActivity(connection, mint, bondingCurveKey),
     ]);
 
     const supplyUi = Number(risk.supply) / 10 ** risk.decimals;
@@ -91,9 +77,9 @@ pumpEvents.on('newToken', async (token) => {
       top10HoldPercent: risk.top10HoldPercent,
       percentBought: risk.percentBought,
       marketCapSol: marketCapSol || 0,
-      uniqueBuyerCount,
-      buyCount,
-      sellCount,
+      uniqueBuyerCount: activity.uniqueBuyers,
+      buyCount: activity.buyCount,
+      sellCount: activity.sellCount,
       thresholds,
     });
 
@@ -120,9 +106,9 @@ pumpEvents.on('newToken', async (token) => {
       devHoldPercent,
       top10HoldPercent: risk.top10HoldPercent,
       percentBought: risk.percentBought,
-      uniqueBuyerCount,
-      buyCount,
-      sellCount,
+      uniqueBuyerCount: activity.uniqueBuyers,
+      buyCount: activity.buyCount,
+      sellCount: activity.sellCount,
       marketCapSol: marketCapSol || 0,
       hasAnySocial,
       alerted,
@@ -136,9 +122,6 @@ pumpEvents.on('newToken', async (token) => {
     }
   } catch (err) {
     console.error(`Failed to evaluate ${mint}:`, err?.message, JSON.stringify(err, Object.getOwnPropertyNames(err || {})));
-  } finally {
-    pumpEvents.unsubscribeTrades(mint);
-    tradeBuffers.delete(mint);
   }
 });
 
