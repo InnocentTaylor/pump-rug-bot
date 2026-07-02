@@ -1,7 +1,7 @@
 import { PublicKey } from '@solana/web3.js';
 import { rateLimited } from './rateLimiter.js';
 
-async function withRetry(fn, retries = 2, delayMs = 500) {
+async function withRetry(fn, retries = 2, delayMs = 600) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       return await fn();
@@ -13,7 +13,7 @@ async function withRetry(fn, retries = 2, delayMs = 500) {
 }
 
 export async function getRecentBuyerActivity(connection, mintAddress, bondingCurveAddress, options = {}) {
-  const { lookbackSignatures = 8 } = options;
+  const { lookbackSignatures = 4 } = options; // tightened further — fewer, lighter calls per coin
 
   if (!bondingCurveAddress) {
     return { uniqueBuyers: 0, buyCount: 0, sellCount: 0 };
@@ -38,9 +38,12 @@ export async function getRecentBuyerActivity(connection, mintAddress, bondingCur
 
   for (const sigInfo of signatures) {
     try {
+      // getTransaction (not getParsedTransaction) skips decoding instruction
+      // data we never use — we only need meta.preTokenBalances/postTokenBalances,
+      // which are included either way. This is meaningfully lighter per call.
       const tx = await withRetry(() =>
         rateLimited(() =>
-          connection.getParsedTransaction(sigInfo.signature, {
+          connection.getTransaction(sigInfo.signature, {
             maxSupportedTransactionVersion: 0,
           })
         )
