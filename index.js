@@ -7,6 +7,7 @@ import { computeRugScore } from './src/rugScore.js';
 import { createBot, sendAlert } from './src/telegram.js';
 import { logDecision, markGraduated } from './src/logger.js';
 import { fetchTokenMetadata } from './src/metadata.js';
+import { canSendAlert, recordAlertSent } from './src/alertLimiter.js';
 
 const {
   TELEGRAM_BOT_TOKEN,
@@ -20,6 +21,7 @@ const {
   EVALUATION_DELAY_MS = '20000',
   REQUIRE_SOCIAL_LINK = 'true',
   MIN_UNIQUE_BUYERS = '2',
+  MAX_ALERTS_PER_HOUR = '3',
 } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -37,6 +39,7 @@ const alertMaxScore = Number(ALERT_MAX_SCORE);
 const minPercentBoughtToAlert = Number(MIN_PERCENT_BOUGHT_TO_ALERT);
 const evaluationDelayMs = Number(EVALUATION_DELAY_MS);
 const requireSocialLink = REQUIRE_SOCIAL_LINK === 'true';
+const maxAlertsPerHour = Number(MAX_ALERTS_PER_HOUR);
 
 const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
 const bot = createBot(TELEGRAM_BOT_TOKEN);
@@ -88,13 +91,18 @@ pumpEvents.on('newToken', async (token) => {
     const scoreQualifies = score <= alertMaxScore;
     const hasRealBuying = risk.percentBought >= minPercentBoughtToAlert;
     const socialRequirementMet = !requireSocialLink || hasAnySocial;
+    const qualifiesOtherwise = scoreQualifies && hasRealBuying && socialRequirementMet;
 
-    const alerted = scoreQualifies && hasRealBuying && socialRequirementMet;
+    let alerted = false;
 
     if (!socialRequirementMet) {
       flags.push('Skipped alert — no social links provided (X/website/Telegram all missing)');
-    } else if (scoreQualifies && !hasRealBuying) {
+    } else if (!hasRealBuying) {
       flags.push(`Skipped alert — only ${risk.percentBought.toFixed(2)}% bought (need ${minPercentBoughtToAlert}%)`);
+    } else if (qualifiesOtherwise && !canSendAlert(maxAlertsPerHour)) {
+      flags.push(`Skipped alert — hourly cap reached (${maxAlertsPerHour}/hour)`);
+    } else if (qualifiesOtherwise) {
+      alerted = true;
     }
 
     logDecision({
@@ -119,6 +127,7 @@ pumpEvents.on('newToken', async (token) => {
     if (alerted) {
       const message = formatAlert({ mint, name, symbol, score, flags, marketCapSol, metadata });
       await sendAlert(bot, TELEGRAM_CHAT_ID, message);
+      recordAlertSent();
     }
   } catch (err) {
     console.error(`Failed to evaluate ${mint}:`, err?.message, JSON.stringify(err, Object.getOwnPropertyNames(err || {})));
