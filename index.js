@@ -7,7 +7,8 @@ import { computeRugScore } from './src/rugScore.js';
 import { createBot, sendAlert } from './src/telegram.js';
 import { logDecision, markGraduated } from './src/logger.js';
 import { fetchTokenMetadata } from './src/metadata.js';
-import { canSendAlert, recordAlertSent } from './src/alertLimiter.js';
+import { initGitHubSync, flushToGitHub } from './src/githubSync.js';
+import { addCandidate, startBatchWindow } from './src/batchAlerter.js';
 
 const {
   TELEGRAM_BOT_TOKEN,
@@ -21,7 +22,8 @@ const {
   EVALUATION_DELAY_MS = '20000',
   REQUIRE_SOCIAL_LINK = 'true',
   MIN_UNIQUE_BUYERS = '2',
-  MAX_ALERTS_PER_HOUR = '3',
+  GITHUB_SYNC_INTERVAL_MS = '300000',
+  BATCH_WINDOW_MS = '1200000',
 } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
@@ -39,12 +41,16 @@ const alertMaxScore = Number(ALERT_MAX_SCORE);
 const minPercentBoughtToAlert = Number(MIN_PERCENT_BOUGHT_TO_ALERT);
 const evaluationDelayMs = Number(EVALUATION_DELAY_MS);
 const requireSocialLink = REQUIRE_SOCIAL_LINK === 'true';
-const maxAlertsPerHour = Number(MAX_ALERTS_PER_HOUR);
 
 const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
 const bot = createBot(TELEGRAM_BOT_TOKEN);
 const pumpEvents = startPumpListener();
 
+const pastEntries = await initGitHubSync();
+const seenMints = new Set(pastEntries.map((e) => e.mint));
+let pendingLines = [];
+
+console.log(`Loaded ${seenMints.size} previously-seen mints from GitHub.`);
 console.log('Watching pump.fun for new launches...');
 
 function escapeMarkdown(text) {
@@ -52,7 +58,48 @@ function escapeMarkdown(text) {
   return String(text).replace(/([_*`[\]])/g, '\\$1');
 }
 
-const seenMints = new Set();
+function formatAlert({ mint, name, symbol, score, flags, marketCapSol, metadata }) {
+  const safety = score <= 15 ? '🟢 Low risk signals' : '🟡 Moderate risk signals';
+  const flagList = flags.length ? flags.map((f) => `• ${f}`).join('\n') : '• No major red flags detected';
+  const safeName = escapeMarkdown(name) || 'Unknown';
+  const safeSymbol = escapeMarkdown(symbol) || '?';
+  const socialLines = [];
+  if (metadata?.twitter) socialLines.push(`[X/Twitter](${metadata.twitter})`);
+  if (metadata?.website) socialLines.push(`[Website](${metadata.website})`);
+  if (metadata?.telegram) socialLines.push(`[Telegram](${metadata.telegram})`);
+  const socialsText = socialLines.length ? socialLines.join(' | ') : 'None provided';
+
+  return [
+    `*New launch:* ${safeName} (${safeSymbol})`,
+    `*Rug score:* ${score}/100 — ${safety}`,
+    flagList,
+    `*Market cap:* ${(marketCapSol || 0).toFixed(2)} SOL`,
+    `*Socials:* ${socialsText}`,
+    `[GMGN](https://gmgn.ai/sol/token/${mint}) | [pump.fun](https://pump.fun/${mint})`,
+  ].join('\n');
+}
+
+// Every window, send only the single best-scoring candidate that qualified
+// during that stretch — quality wins over whichever happened to finish
+// evaluating first.
+startBatchWindow(Number(BATCH_WINDOW_MS), async (best) => {
+  const message = formatAlert(best);
+  await sendAlert(bot, TELEGRAM_CHAT_ID, message);
+  console.log(`Sent batch winner: ${best.symbol || best.mint} — score ${best.score}`);
+});
+
+setInterval(async () => {
+  if (pendingLines.length === 0) return;
+  const toSend = pendingLines;
+  pendingLines = [];
+  await flushToGitHub(toSend);
+}, Number(GITHUB_SYNC_INTERVAL_MS));
+
+process.on('SIGTERM', async () => {
+  console.log('Shutting down — flushing remaining log entries to GitHub...');
+  if (pendingLines.length > 0) await flushToGitHub(pendingLines);
+  process.exit(0);
+});
 
 pumpEvents.on('newToken', async (token) => {
   const { mint, name, symbol, marketCapSol, initialBuy, bondingCurveKey, uri } = token;
@@ -63,7 +110,6 @@ pumpEvents.on('newToken', async (token) => {
   try {
     await new Promise((r) => setTimeout(r, evaluationDelayMs));
 
-    // Cheap checks first — most coins get filtered out here.
     const [risk, metadata] = await Promise.all([
       getMintRisk(connection, mint, bondingCurveKey),
       fetchTokenMetadata(uri),
@@ -96,10 +142,8 @@ pumpEvents.on('newToken', async (token) => {
     } else if (!hasRealBuying) {
       flags.push(`Skipped alert — only ${risk.percentBought.toFixed(2)}% bought (need ${minPercentBoughtToAlert}%)`);
     } else if (score <= alertMaxScore) {
-      // Only NOW, on a genuine near-qualifying candidate, spend the
-      // expensive buyer-lookup — this is what keeps RPC load light.
+      // Only spend the expensive buyer-lookup on genuine near-qualifying coins.
       const activity = await getRecentBuyerActivity(connection, mint, bondingCurveKey);
-
       const finalResult = computeRugScore({
         mintAuthorityRenounced: risk.mintAuthorityRenounced,
         freezeAuthorityRenounced: risk.freezeAuthorityRenounced,
@@ -114,34 +158,25 @@ pumpEvents.on('newToken', async (token) => {
       });
       score = finalResult.score;
       flags = finalResult.flags;
-
-      if (score <= alertMaxScore && !canSendAlert(maxAlertsPerHour)) {
-        flags.push(`Skipped alert — hourly cap reached (${maxAlertsPerHour}/hour)`);
-      } else if (score <= alertMaxScore) {
-        alerted = true;
-      }
+      alerted = score <= alertMaxScore;
     }
 
-    logDecision({
-      mint,
-      name,
-      symbol,
-      score,
-      flags,
-      devHoldPercent,
+    const entry = {
+      mint, name, symbol, score, flags, devHoldPercent,
       top10HoldPercent: risk.top10HoldPercent,
       percentBought: risk.percentBought,
       marketCapSol: marketCapSol || 0,
-      hasAnySocial,
-      alerted,
-    });
+      hasAnySocial, alerted,
+      timestamp: new Date().toISOString(),
+    };
+
+    logDecision(entry);
+    pendingLines.push(JSON.stringify(entry));
 
     console.log(`${symbol || mint} — score ${score}`, flags);
 
     if (alerted) {
-      const message = formatAlert({ mint, name, symbol, score, flags, marketCapSol, metadata });
-      await sendAlert(bot, TELEGRAM_CHAT_ID, message);
-      recordAlertSent();
+      addCandidate({ mint, name, symbol, score, flags, marketCapSol, metadata });
     }
   } catch (err) {
     console.error(`Failed to evaluate ${mint}:`, err?.message, JSON.stringify(err, Object.getOwnPropertyNames(err || {})));
@@ -150,32 +185,5 @@ pumpEvents.on('newToken', async (token) => {
 
 pumpEvents.on('tokenGraduated', (data) => {
   console.log('GRADUATION EVENT RECEIVED:', JSON.stringify(data));
-  if (data.mint) {
-    markGraduated(data.mint);
-  }
+  if (data.mint) markGraduated(data.mint);
 });
-
-function formatAlert({ mint, name, symbol, score, flags, marketCapSol, metadata }) {
-  const safety = score <= 15 ? '🟢 Low risk signals' : '🟡 Moderate risk signals';
-  const flagList = flags.length
-    ? flags.map((f) => `• ${f}`).join('\n')
-    : '• No major red flags detected';
-
-  const safeName = escapeMarkdown(name) || 'Unknown';
-  const safeSymbol = escapeMarkdown(symbol) || '?';
-
-  const socialLines = [];
-  if (metadata?.twitter) socialLines.push(`[X/Twitter](${metadata.twitter})`);
-  if (metadata?.website) socialLines.push(`[Website](${metadata.website})`);
-  if (metadata?.telegram) socialLines.push(`[Telegram](${metadata.telegram})`);
-  const socialsText = socialLines.length ? socialLines.join(' | ') : 'None provided';
-
-  return [
-    `*New launch:* ${safeName} (${safeSymbol})`,
-    `*Rug score:* ${score}/100 — ${safety}`,
-    flagList,
-    `*Market cap:* ${(marketCapSol || 0).toFixed(2)} SOL`,
-    `*Socials:* ${socialsText}`,
-    `[GMGN](https://gmgn.ai/sol/token/${mint}) | [pump.fun](https://pump.fun/${mint})`,
-  ].join('\n');
-}
