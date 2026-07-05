@@ -141,4 +141,86 @@ pumpEvents.on('newToken', async (token) => {
     if (!socialRequirementMet) {
       flags.push('Skipped alert — no social links provided (X/website/Telegram all missing)');
     } else if (!hasRealBuying) {
-      flags.push(`Skipped alert — only ${ris
+      flags.push(`Skipped alert — only ${risk.percentBought.toFixed(2)}% bought (need ${minPercentBoughtToAlert}%)`);
+    } else if (score <= alertMaxScore) {
+      const activity = await getRecentBuyerActivity(connection, mint, bondingCurveKey);
+      uniqueBuyerCount = activity.uniqueBuyers;
+      buyCount = activity.buyCount;
+      sellCount = activity.sellCount;
+
+      const finalResult = computeRugScore({
+        mintAuthorityRenounced: risk.mintAuthorityRenounced,
+        freezeAuthorityRenounced: risk.freezeAuthorityRenounced,
+        devHoldPercent,
+        top10HoldPercent: risk.top10HoldPercent,
+        percentBought: risk.percentBought,
+        marketCapSol: marketCapSol || 0,
+        uniqueBuyerCount,
+        buyCount,
+        sellCount,
+        thresholds,
+      });
+      score = finalResult.score;
+      flags = finalResult.flags;
+      alerted = score <= alertMaxScore;
+    }
+
+    const entry = {
+      recordType: 'decision',
+      mint,
+      name,
+      symbol,
+      score,
+      flags,
+      devHoldPercent,
+      top10HoldPercent: risk.top10HoldPercent,
+      percentBought: risk.percentBought,
+      uniqueBuyerCount,
+      buyCount,
+      sellCount,
+      marketCapSol: marketCapSol || 0,
+      hasAnySocial,
+      alerted,
+      timestamp: new Date().toISOString(),
+    };
+
+    logDecision(entry);
+    pendingLines.push(JSON.stringify(entry));
+
+    console.log(`${symbol || mint} — score ${score}`, flags);
+
+    if (alerted) {
+      addCandidate({ mint, name, symbol, score, flags, marketCapSol, metadata });
+    }
+  } catch (err) {
+    console.error(`Failed to evaluate ${mint}:`, err?.message);
+
+    const failedEntry = {
+      recordType: 'failed',
+      mint,
+      name,
+      symbol,
+      uniqueBuyerCount,
+      buyCount,
+      sellCount,
+      errorMessage: err?.message || 'unknown error',
+      timestamp: new Date().toISOString(),
+    };
+    pendingLines.push(JSON.stringify(failedEntry));
+  }
+});
+
+pumpEvents.on('tokenGraduated', (data) => {
+  console.log('GRADUATION EVENT RECEIVED:', JSON.stringify(data));
+  if (data.mint) {
+    markGraduated(data.mint);
+
+    const graduationEntry = {
+      recordType: 'graduation',
+      mint: data.mint,
+      raw: data,
+      timestamp: new Date().toISOString(),
+    };
+    pendingLines.push(JSON.stringify(graduationEntry));
+  }
+});
