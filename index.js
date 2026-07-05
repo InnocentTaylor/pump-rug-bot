@@ -79,9 +79,6 @@ function formatAlert({ mint, name, symbol, score, flags, marketCapSol, metadata 
   ].join('\n');
 }
 
-// Every window, send only the single best-scoring candidate that qualified
-// during that stretch — quality wins over whichever happened to finish
-// evaluating first.
 startBatchWindow(Number(BATCH_WINDOW_MS), async (best) => {
   const message = formatAlert(best);
   await sendAlert(bot, TELEGRAM_CHAT_ID, message);
@@ -106,6 +103,12 @@ pumpEvents.on('newToken', async (token) => {
 
   if (seenMints.has(mint)) return;
   seenMints.add(mint);
+
+  // Declared up front so buyer-activity numbers survive into the final
+  // logged entry regardless of which branch below actually runs.
+  let uniqueBuyerCount = null;
+  let buyCount = null;
+  let sellCount = null;
 
   try {
     await new Promise((r) => setTimeout(r, evaluationDelayMs));
@@ -142,8 +145,11 @@ pumpEvents.on('newToken', async (token) => {
     } else if (!hasRealBuying) {
       flags.push(`Skipped alert — only ${risk.percentBought.toFixed(2)}% bought (need ${minPercentBoughtToAlert}%)`);
     } else if (score <= alertMaxScore) {
-      // Only spend the expensive buyer-lookup on genuine near-qualifying coins.
       const activity = await getRecentBuyerActivity(connection, mint, bondingCurveKey);
+      uniqueBuyerCount = activity.uniqueBuyers;
+      buyCount = activity.buyCount;
+      sellCount = activity.sellCount;
+
       const finalResult = computeRugScore({
         mintAuthorityRenounced: risk.mintAuthorityRenounced,
         freezeAuthorityRenounced: risk.freezeAuthorityRenounced,
@@ -151,9 +157,9 @@ pumpEvents.on('newToken', async (token) => {
         top10HoldPercent: risk.top10HoldPercent,
         percentBought: risk.percentBought,
         marketCapSol: marketCapSol || 0,
-        uniqueBuyerCount: activity.uniqueBuyers,
-        buyCount: activity.buyCount,
-        sellCount: activity.sellCount,
+        uniqueBuyerCount,
+        buyCount,
+        sellCount,
         thresholds,
       });
       score = finalResult.score;
@@ -162,9 +168,11 @@ pumpEvents.on('newToken', async (token) => {
     }
 
     const entry = {
+      recordType: 'decision',
       mint, name, symbol, score, flags, devHoldPercent,
       top10HoldPercent: risk.top10HoldPercent,
       percentBought: risk.percentBought,
+      uniqueBuyerCount, buyCount, sellCount,
       marketCapSol: marketCapSol || 0,
       hasAnySocial, alerted,
       timestamp: new Date().toISOString(),
@@ -179,11 +187,36 @@ pumpEvents.on('newToken', async (token) => {
       addCandidate({ mint, name, symbol, score, flags, marketCapSol, metadata });
     }
   } catch (err) {
-    console.error(`Failed to evaluate ${mint}:`, err?.message, JSON.stringify(err, Object.getOwnPropertyNames(err || {})));
+    console.error(`Failed to evaluate ${mint}:`, err?.message);
+
+    // Previously these just vanished — now every failure leaves a real
+    // trace, so backtesting later knows what was attempted but never
+    // completed, not just silence.
+    const failedEntry = {
+      recordType: 'failed',
+      mint, name, symbol,
+      uniqueBuyerCount, buyCount, sellCount,
+      errorMessage: err?.message || 'unknown error',
+      timestamp: new Date().toISOString(),
+    };
+    pendingLines.push(JSON.stringify(failedEntry));
   }
 });
 
 pumpEvents.on('tokenGraduated', (data) => {
   console.log('GRADUATION EVENT RECEIVED:', JSON.stringify(data));
-  if (data.mint) markGraduated(data.mint);
+  if (data.mint) {
+    markGraduated(data.mint);
+
+    // Pushed as its own record rather than editing the original decision
+    // line — simpler and safer than rewriting already-pushed GitHub
+    // history. The backtest script matches these back up by mint address.
+    const graduationEntry = {
+      recordType: 'graduation',
+      mint: data.mint,
+      raw: data,
+      timestamp: new Date().toISOString(),
+    };
+    pendingLines.push(JSON.stringify(graduationEntry));
+  }
 });
