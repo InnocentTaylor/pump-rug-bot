@@ -63,46 +63,63 @@ pumpEvents.on('newToken', async (token) => {
   try {
     await new Promise((r) => setTimeout(r, evaluationDelayMs));
 
-    const [risk, metadata, activity] = await Promise.all([
+    // Cheap checks first — most coins get filtered out here.
+    const [risk, metadata] = await Promise.all([
       getMintRisk(connection, mint, bondingCurveKey),
       fetchTokenMetadata(uri),
-      getRecentBuyerActivity(connection, mint, bondingCurveKey),
     ]);
 
     const supplyUi = Number(risk.supply) / 10 ** risk.decimals;
     const devHoldPercent =
       supplyUi > 0 ? (Number(initialBuy || 0) / supplyUi) * 100 : 0;
 
-    const { score, flags } = computeRugScore({
+    const hasAnySocial = metadata.hasTwitter || metadata.hasWebsite || metadata.hasTelegram;
+    const hasRealBuying = risk.percentBought >= minPercentBoughtToAlert;
+    const socialRequirementMet = !requireSocialLink || hasAnySocial;
+
+    const baseResult = computeRugScore({
       mintAuthorityRenounced: risk.mintAuthorityRenounced,
       freezeAuthorityRenounced: risk.freezeAuthorityRenounced,
       devHoldPercent,
       top10HoldPercent: risk.top10HoldPercent,
       percentBought: risk.percentBought,
       marketCapSol: marketCapSol || 0,
-      uniqueBuyerCount: activity.uniqueBuyers,
-      buyCount: activity.buyCount,
-      sellCount: activity.sellCount,
       thresholds,
     });
 
-    const hasAnySocial = metadata.hasTwitter || metadata.hasWebsite || metadata.hasTelegram;
-
-    const scoreQualifies = score <= alertMaxScore;
-    const hasRealBuying = risk.percentBought >= minPercentBoughtToAlert;
-    const socialRequirementMet = !requireSocialLink || hasAnySocial;
-    const qualifiesOtherwise = scoreQualifies && hasRealBuying && socialRequirementMet;
-
+    let score = baseResult.score;
+    let flags = baseResult.flags;
     let alerted = false;
 
     if (!socialRequirementMet) {
       flags.push('Skipped alert — no social links provided (X/website/Telegram all missing)');
     } else if (!hasRealBuying) {
       flags.push(`Skipped alert — only ${risk.percentBought.toFixed(2)}% bought (need ${minPercentBoughtToAlert}%)`);
-    } else if (qualifiesOtherwise && !canSendAlert(maxAlertsPerHour)) {
-      flags.push(`Skipped alert — hourly cap reached (${maxAlertsPerHour}/hour)`);
-    } else if (qualifiesOtherwise) {
-      alerted = true;
+    } else if (score <= alertMaxScore) {
+      // Only NOW, on a genuine near-qualifying candidate, spend the
+      // expensive buyer-lookup — this is what keeps RPC load light.
+      const activity = await getRecentBuyerActivity(connection, mint, bondingCurveKey);
+
+      const finalResult = computeRugScore({
+        mintAuthorityRenounced: risk.mintAuthorityRenounced,
+        freezeAuthorityRenounced: risk.freezeAuthorityRenounced,
+        devHoldPercent,
+        top10HoldPercent: risk.top10HoldPercent,
+        percentBought: risk.percentBought,
+        marketCapSol: marketCapSol || 0,
+        uniqueBuyerCount: activity.uniqueBuyers,
+        buyCount: activity.buyCount,
+        sellCount: activity.sellCount,
+        thresholds,
+      });
+      score = finalResult.score;
+      flags = finalResult.flags;
+
+      if (score <= alertMaxScore && !canSendAlert(maxAlertsPerHour)) {
+        flags.push(`Skipped alert — hourly cap reached (${maxAlertsPerHour}/hour)`);
+      } else if (score <= alertMaxScore) {
+        alerted = true;
+      }
     }
 
     logDecision({
@@ -114,9 +131,6 @@ pumpEvents.on('newToken', async (token) => {
       devHoldPercent,
       top10HoldPercent: risk.top10HoldPercent,
       percentBought: risk.percentBought,
-      uniqueBuyerCount: activity.uniqueBuyers,
-      buyCount: activity.buyCount,
-      sellCount: activity.sellCount,
       marketCapSol: marketCapSol || 0,
       hasAnySocial,
       alerted,
